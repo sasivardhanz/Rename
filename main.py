@@ -1,7 +1,7 @@
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from pyrogram import Client, filters, idle
@@ -12,30 +12,12 @@ print("🔥 PROFESSIONAL RENAME BOT RUNNING")
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ID = os.getenv("API_ID")
+API_ID = int(os.getenv("API_ID"))
 API_HASH = os.getenv("API_HASH")
 MONGO_URI = os.getenv("MONGO_URI")
-ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
+ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 
-if not BOT_TOKEN:
-    raise ValueError("BOT_TOKEN missing")
-
-if not API_ID:
-    raise ValueError("API_ID missing")
-
-if not API_HASH:
-    raise ValueError("API_HASH missing")
-
-if not MONGO_URI:
-    raise ValueError("MONGO_URI missing")
-
-API_ID = int(API_ID)
-
-ADMIN_IDS = [
-    int(x.strip())
-    for x in ADMIN_IDS_RAW.split(",")
-    if x.strip().isdigit()
-]
+PAYPAL_EMAIL = "sasivardhan356@gmail.com"
 
 DOWNLOAD_DIR = "downloads"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
@@ -61,6 +43,15 @@ cooldown = {}
 
 FREE_LIMIT = 500 * 1024 * 1024
 PREMIUM_LIMIT = 2 * 1024 * 1024 * 1024
+FREE_THUMB_LIMIT = 10
+
+
+def now_utc():
+    return datetime.utcnow()
+
+
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
 
 
 def get_user(user_id):
@@ -70,29 +61,33 @@ def get_user(user_id):
         user = {
             "user_id": user_id,
             "premium": False,
+            "premium_expiry": None,
             "caption": None,
             "prefix": "",
             "suffix": "",
             "auto_format": None,
             "thumbnail": None,
+            "thumb_count": 0,
+            "thumb_date": now_utc().strftime("%Y-%m-%d"),
             "files_renamed": 0,
-            "joined_at": datetime.utcnow()
+            "joined_at": now_utc()
         }
         users_col.insert_one(user)
+
+    expiry = user.get("premium_expiry")
+    if expiry and isinstance(expiry, datetime) and expiry < now_utc():
+        users_col.update_one(
+            {"user_id": user_id},
+            {"$set": {"premium": False, "premium_expiry": None}}
+        )
+        user["premium"] = False
+        user["premium_expiry"] = None
 
     return user
 
 
 def update_user(user_id, data):
-    users_col.update_one(
-        {"user_id": user_id},
-        {"$set": data},
-        upsert=True
-    )
-
-
-def is_admin(user_id):
-    return user_id in ADMIN_IDS
+    users_col.update_one({"user_id": user_id}, {"$set": data}, upsert=True)
 
 
 def clean_filename(name):
@@ -119,16 +114,12 @@ def get_media(message):
 
 def get_media_info(message):
     media = get_media(message)
-
     file_name = getattr(media, "file_name", None) or "Unknown"
     file_size = getattr(media, "file_size", 0)
     mime_type = getattr(media, "mime_type", None) or "Unknown"
     dc_id = getattr(media, "dc_id", None) or "Unknown"
 
-    ext = os.path.splitext(file_name)[1].replace(".", "")
-    if not ext:
-        ext = "Unknown"
-
+    ext = os.path.splitext(file_name)[1].replace(".", "") or "Unknown"
     return file_name, file_size, ext, mime_type, dc_id
 
 
@@ -158,6 +149,29 @@ def apply_auto_format(template, old_name):
     return clean_filename(new_name)
 
 
+def premium_text():
+    return f"""
+💎 Premium Plans
+
+⭐ 100 Telegram Stars → 1 Month Premium
+⭐ 250 Telegram Stars → 3 Months Premium
+
+✨ Premium Benefits:
+• Bigger file upload limit
+• Faster processing
+• Batch rename
+• Unlimited thumbnails
+• Advanced settings
+• Priority support
+
+💳 Payment Methods:
+• Telegram Stars
+• PayPal: {PAYPAL_EMAIL}
+
+After payment, send screenshot to admin for activation.
+"""
+
+
 def main_buttons():
     return InlineKeyboardMarkup([
         [
@@ -170,11 +184,11 @@ def main_buttons():
         ],
         [
             InlineKeyboardButton("📊 My Plan", callback_data="myplan"),
-            InlineKeyboardButton("❓ Help", callback_data="help")
+            InlineKeyboardButton("💎 Premium", callback_data="premium")
         ],
         [
-            InlineKeyboardButton("💎 Premium", callback_data="premium"),
-            InlineKeyboardButton("❤️ Donate", callback_data="donate")
+            InlineKeyboardButton("❤️ Donate", callback_data="donate"),
+            InlineKeyboardButton("❓ Help", callback_data="help")
         ]
     ])
 
@@ -232,22 +246,17 @@ async def progress(current, total, message, start, text):
 
 async def set_bot_commands():
     await bot.set_bot_commands([
-        BotCommand("start", "✔️ Bot alive checking"),
-        BotCommand("premium", "💎 To upgrade your plan"),
-        BotCommand("myplan", "❄️ To check your current plan info"),
-        BotCommand("metadata", "⚡ To Configure Your Metadata Tags"),
-        BotCommand("settings", "⚙️ To Configure Your Settings"),
-        BotCommand("viewthumb", "👀 View your thumbnail"),
-        BotCommand("delthumb", "🗑 Delete your thumbnail"),
-        BotCommand("set_caption", "✏️ Set a custom caption"),
-        BotCommand("see_caption", "👀 See your custom caption"),
-        BotCommand("del_caption", "🗑 Delete Custom Caption"),
+        BotCommand("start", "✔️ Start The Bot"),
+        BotCommand("premium", "💎 Premium Plans"),
+        BotCommand("myplan", "❄️ Check Current Plan"),
+        BotCommand("settings", "⚙️ Configure Settings"),
+        BotCommand("viewthumb", "👀 View Thumbnail"),
+        BotCommand("delthumb", "🗑 Delete Thumbnail"),
+        BotCommand("set_caption", "✏️ Set Caption"),
+        BotCommand("see_caption", "👀 See Caption"),
+        BotCommand("del_caption", "🗑 Delete Caption"),
         BotCommand("ping", "🔥 Check Bot Ping"),
-        BotCommand("donate", "💗 To Support Developer"),
-        BotCommand("task", "✨ Complete Simple Task & Use Me For Free"),
-        BotCommand("add_premium", "🎉 Add user to Premium List Admin Only"),
-        BotCommand("remove_premium", "🙊 Remove user from Premium List Admin Only"),
-        BotCommand("premium_list", "🌸 See all Premium Users Admin Only"),
+        BotCommand("donate", "💗 Support Developer"),
         BotCommand("admin", "👑 Admin Panel")
     ])
 
@@ -257,8 +266,7 @@ async def ping(_, message):
     start = time.time()
     msg = await message.reply_text("Checking ping...")
     end = time.time()
-    ms = round((end - start) * 1000)
-    await msg.edit_text(f"🔥 Bot Ping: `{ms} ms`")
+    await msg.edit_text(f"🔥 Bot Ping: `{round((end - start) * 1000)} ms`")
 
 
 @bot.on_message(filters.command("start"))
@@ -267,9 +275,7 @@ async def start(_, message):
 
     await message.reply_text(
         f"""
-✔️ Bot alive checking.
-
-Hello {message.from_user.first_name}
+👋 Hello {message.from_user.first_name}
 
 I can rename Telegram files professionally.
 
@@ -281,11 +287,13 @@ Features:
 • Custom caption
 • Prefix / suffix
 • Auto rename
-• Premium users
+• Premium system
 • Admin panel
 • MongoDB storage
 
 Plan: {"Premium 💎" if user.get("premium") else "Free"}
+
+Free Thumbnail Limit: {FREE_THUMB_LIMIT}/day
 
 Send me any file/video/audio to begin.
 """,
@@ -295,26 +303,16 @@ Send me any file/video/audio to begin.
 
 @bot.on_message(filters.command("premium"))
 async def premium(_, message):
-    await message.reply_text(
-        """
-💎 Premium Plan
-
-Premium users get:
-• Bigger file limit
-• Faster priority access
-• Batch rename
-• Custom caption
-• Thumbnail support
-
-Contact admin to upgrade.
-"""
-    )
+    await message.reply_text(premium_text())
 
 
 @bot.on_message(filters.command("myplan"))
 async def myplan(_, message):
     user = get_user(message.from_user.id)
     limit = PREMIUM_LIMIT if user.get("premium") else FREE_LIMIT
+
+    expiry = user.get("premium_expiry")
+    expiry_text = expiry.strftime("%d-%m-%Y") if expiry else "None"
 
     await message.reply_text(
         f"""
@@ -323,14 +321,10 @@ async def myplan(_, message):
 Plan: {"Premium 💎" if user.get("premium") else "Free"}
 File Limit: {format_size(limit)}
 Files Renamed: {user.get("files_renamed", 0)}
+Thumbnail Used Today: {user.get("thumb_count", 0)} / {FREE_THUMB_LIMIT}
+Premium Expiry: {expiry_text}
 """
     )
-
-
-@bot.on_message(filters.command("metadata"))
-async def metadata(_, message):
-    waiting[message.from_user.id] = "metadata"
-    await message.reply_text("⚡ Send your metadata text.")
 
 
 @bot.on_message(filters.command("settings"))
@@ -373,12 +367,7 @@ async def set_caption(_, message):
 @bot.on_message(filters.command("see_caption"))
 async def see_caption(_, message):
     user = get_user(message.from_user.id)
-    caption = user.get("caption")
-
-    if caption:
-        await message.reply_text(f"👀 Your caption:\n\n{caption}")
-    else:
-        await message.reply_text("No custom caption saved.")
+    await message.reply_text(f"👀 Your caption:\n\n{user.get('caption') or 'No caption saved.'}")
 
 
 @bot.on_message(filters.command("del_caption"))
@@ -390,23 +379,13 @@ async def del_caption(_, message):
 @bot.on_message(filters.command("donate"))
 async def donate(_, message):
     await message.reply_text(
-        """
+        f"""
 💗 Support Developer
 
-Thank you for using this bot.
-You can support the developer by sharing the bot with others.
-"""
-    )
+PayPal:
+{PAYPAL_EMAIL}
 
-
-@bot.on_message(filters.command("task"))
-async def task(_, message):
-    await message.reply_text(
-        """
-✨ Complete Simple Task & Use Me For Free
-
-Currently no task is available.
-Please check again later.
+Thank you for supporting the bot.
 """
     )
 
@@ -423,11 +402,7 @@ async def callback_handler(_, query):
     elif data == "batch":
         waiting[user_id] = "batch"
         batch_files[user_id] = []
-        await query.message.edit_text(
-            "📦 Batch Rename Mode\n\n"
-            "Send multiple files one by one.\n"
-            "When finished, send /done"
-        )
+        await query.message.edit_text("📦 Batch Rename Mode\n\nSend multiple files.\nWhen finished, send /done")
 
     elif data == "thumbnail":
         waiting[user_id] = "thumbnail"
@@ -435,6 +410,34 @@ async def callback_handler(_, query):
 
     elif data == "settings":
         await query.message.edit_text("⚙ Settings", reply_markup=settings_buttons())
+
+    elif data == "premium":
+        await query.message.edit_text(premium_text(), reply_markup=main_buttons())
+
+    elif data == "donate":
+        await query.message.edit_text(
+            f"💗 Support Developer\n\nPayPal:\n{PAYPAL_EMAIL}",
+            reply_markup=main_buttons()
+        )
+
+    elif data == "myplan":
+        user = get_user(user_id)
+        limit = PREMIUM_LIMIT if user.get("premium") else FREE_LIMIT
+        expiry = user.get("premium_expiry")
+        expiry_text = expiry.strftime("%d-%m-%Y") if expiry else "None"
+
+        await query.message.edit_text(
+            f"""
+❄️ Your Current Plan
+
+Plan: {"Premium 💎" if user.get("premium") else "Free"}
+File Limit: {format_size(limit)}
+Files Renamed: {user.get("files_renamed", 0)}
+Thumbnail Used Today: {user.get("thumb_count", 0)} / {FREE_THUMB_LIMIT}
+Premium Expiry: {expiry_text}
+""",
+            reply_markup=main_buttons()
+        )
 
     elif data == "set_caption":
         waiting[user_id] = "caption"
@@ -461,9 +464,7 @@ async def callback_handler(_, query):
 
     elif data == "auto":
         waiting[user_id] = "auto"
-        await query.message.edit_text(
-            "🔁 Send auto rename format.\n\nExample:\n{title} - {quality} - @YourChannel"
-        )
+        await query.message.edit_text("🔁 Send auto rename format.\n\nExample:\n{title} - {quality} - @YourChannel")
 
     elif data == "viewthumb":
         user = get_user(user_id)
@@ -486,32 +487,6 @@ async def callback_handler(_, query):
 
         update_user(user_id, {"thumbnail": None})
         await query.message.edit_text("🗑 Thumbnail deleted.", reply_markup=settings_buttons())
-
-    elif data == "myplan":
-        user = get_user(user_id)
-        limit = PREMIUM_LIMIT if user.get("premium") else FREE_LIMIT
-        await query.message.edit_text(
-            f"""
-❄️ Your Current Plan
-
-Plan: {"Premium 💎" if user.get("premium") else "Free"}
-File Limit: {format_size(limit)}
-Files Renamed: {user.get("files_renamed", 0)}
-""",
-            reply_markup=main_buttons()
-        )
-
-    elif data == "premium":
-        await query.message.edit_text(
-            "💎 Premium gives bigger limits and priority access.\n\nContact admin to upgrade.",
-            reply_markup=main_buttons()
-        )
-
-    elif data == "donate":
-        await query.message.edit_text(
-            "💗 Thank you for supporting developer.\n\nShare the bot with others.",
-            reply_markup=main_buttons()
-        )
 
     elif data == "help":
         await query.message.edit_text(
@@ -551,15 +526,39 @@ Episode {number}.mkv
 @bot.on_message(filters.photo)
 async def photo_handler(_, message):
     user_id = message.from_user.id
+    user = get_user(user_id)
 
     if waiting.get(user_id) != "thumbnail":
         return await message.reply_text("Click 🖼 Thumbnail first.")
 
+    today = now_utc().strftime("%Y-%m-%d")
+
+    if user.get("thumb_date") != today:
+        update_user(user_id, {"thumb_date": today, "thumb_count": 0})
+        user["thumb_count"] = 0
+
+    if not user.get("premium") and user.get("thumb_count", 0) >= FREE_THUMB_LIMIT:
+        return await message.reply_text(
+            f"""
+⚠️ Daily thumbnail limit reached.
+
+Free users can set {FREE_THUMB_LIMIT} thumbnails per day.
+
+Upgrade to premium for unlimited thumbnails.
+
+{premium_text()}
+"""
+        )
+
     path = await message.download(file_name=f"{DOWNLOAD_DIR}/thumb_{user_id}.jpg")
 
-    update_user(user_id, {"thumbnail": path})
-    waiting[user_id] = None
+    update_user(user_id, {
+        "thumbnail": path,
+        "thumb_count": user.get("thumb_count", 0) + 1,
+        "thumb_date": today
+    })
 
+    waiting[user_id] = None
     await message.reply_text("Thumbnail saved.")
 
 
@@ -572,7 +571,7 @@ async def file_handler(client, message):
     if not media:
         return
 
-    if user_id in cooldown and time.time() - cooldown[user_id] < 3:
+    if user_id in cooldown and time.time() - cooldown[user_id] < 3 and not user.get("premium"):
         return await message.reply_text("Slow down. Try again in a few seconds.")
 
     cooldown[user_id] = time.time()
@@ -581,16 +580,11 @@ async def file_handler(client, message):
     limit = PREMIUM_LIMIT if user.get("premium") else FREE_LIMIT
 
     if file_size > limit:
-        return await message.reply_text(
-            f"File too large.\n\nYour limit: {format_size(limit)}"
-        )
+        return await message.reply_text(f"File too large.\n\nYour limit: {format_size(limit)}")
 
     if waiting.get(user_id) == "batch":
         batch_files.setdefault(user_id, []).append(message)
-        return await message.reply_text(
-            f"Added to batch: {len(batch_files[user_id])}\n\n"
-            "Send more files or send /done."
-        )
+        return await message.reply_text(f"Added to batch: {len(batch_files[user_id])}\n\nSend more files or send /done.")
 
     file_name, size, ext, mime, dc = get_media_info(message)
 
@@ -598,10 +592,7 @@ async def file_handler(client, message):
         new_name = apply_auto_format(user.get("auto_format"), file_name)
         return await rename_file(client, message, new_name)
 
-    waiting[user_id] = {
-        "type": "rename_name",
-        "message": message
-    }
+    waiting[user_id] = {"type": "rename_name", "message": message}
 
     await message.reply_text(
         f"""
@@ -641,9 +632,9 @@ Episode {{number}}.mkv
 
 @bot.on_message(filters.text & ~filters.command([
     "start", "ping", "done", "admin", "stats", "add_premium",
-    "remove_premium", "broadcast", "premium", "myplan", "metadata",
-    "settings", "viewthumb", "delthumb", "set_caption", "see_caption",
-    "del_caption", "donate", "task", "premium_list"
+    "remove_premium", "premium_list", "broadcast", "premium",
+    "myplan", "settings", "viewthumb", "delthumb", "set_caption",
+    "see_caption", "del_caption", "donate"
 ]))
 async def text_handler(client, message):
     user_id = message.from_user.id
@@ -669,11 +660,6 @@ async def text_handler(client, message):
         waiting[user_id] = None
         return await message.reply_text("Auto rename saved.")
 
-    if state == "metadata":
-        update_user(user_id, {"metadata": message.text})
-        waiting[user_id] = None
-        return await message.reply_text("Metadata saved.")
-
     if state == "batch_template":
         template = message.text
         files = batch_files.get(user_id, [])
@@ -692,7 +678,6 @@ async def text_handler(client, message):
     if isinstance(state, dict) and state.get("type") == "rename_name":
         file_msg = state["message"]
         new_name = clean_filename(message.text)
-
         waiting[user_id] = None
         return await rename_file(client, file_msg, new_name)
 
@@ -765,7 +750,7 @@ async def rename_file(client, file_msg, new_name):
             "old_name": old_name,
             "new_name": final_name,
             "size": getattr(media, "file_size", 0),
-            "date": datetime.utcnow()
+            "date": now_utc()
         })
 
         await status.delete()
@@ -805,7 +790,7 @@ Premium Users: {premium_users}
 Files Renamed: {total_files}
 
 Commands:
-/add_premium user_id
+/add_premium user_id months
 /remove_premium user_id
 /premium_list
 /broadcast message
@@ -819,17 +804,13 @@ async def admin_stats(_, message):
     if not is_admin(message.from_user.id):
         return
 
-    total_users = users_col.count_documents({})
-    premium_users = users_col.count_documents({"premium": True})
-    total_files = files_col.count_documents({})
-
     await message.reply_text(
         f"""
 📊 Bot Stats
 
-Users: {total_users}
-Premium Users: {premium_users}
-Files Renamed: {total_files}
+Users: {users_col.count_documents({})}
+Premium Users: {users_col.count_documents({"premium": True})}
+Files Renamed: {files_col.count_documents({})}
 """
     )
 
@@ -840,11 +821,22 @@ async def add_premium(_, message):
         return
 
     try:
-        user_id = int(message.text.split()[1])
-        update_user(user_id, {"premium": True})
-        await message.reply_text("Premium added.")
+        parts = message.text.split()
+        user_id = int(parts[1])
+        months = int(parts[2]) if len(parts) > 2 else 1
+
+        expiry = now_utc() + timedelta(days=30 * months)
+
+        update_user(user_id, {
+            "premium": True,
+            "premium_expiry": expiry
+        })
+
+        await message.reply_text(
+            f"Premium added.\nUser: `{user_id}`\nMonths: {months}\nExpiry: {expiry.strftime('%d-%m-%Y')}"
+        )
     except:
-        await message.reply_text("Usage:\n/add_premium user_id")
+        await message.reply_text("Usage:\n/add_premium user_id months")
 
 
 @bot.on_message(filters.command("remove_premium"))
@@ -854,7 +846,7 @@ async def remove_premium(_, message):
 
     try:
         user_id = int(message.text.split()[1])
-        update_user(user_id, {"premium": False})
+        update_user(user_id, {"premium": False, "premium_expiry": None})
         await message.reply_text("Premium removed.")
     except:
         await message.reply_text("Usage:\n/remove_premium user_id")
@@ -873,7 +865,9 @@ async def premium_list(_, message):
     text = "🌸 Premium Users:\n\n"
 
     for user in users:
-        text += f"• `{user['user_id']}`\n"
+        expiry = user.get("premium_expiry")
+        expiry_text = expiry.strftime("%d-%m-%Y") if expiry else "No expiry"
+        text += f"• `{user['user_id']}` — {expiry_text}\n"
 
     await message.reply_text(text)
 
