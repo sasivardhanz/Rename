@@ -2,9 +2,11 @@ import os
 import re
 import time
 from datetime import datetime, timedelta
+
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from pyrogram import Client, filters, idle
+from pyrogram.errors import MessageNotModified
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 
 print("🔥 PROFESSIONAL RENAME BOT RUNNING")
@@ -12,11 +14,33 @@ print("🔥 PROFESSIONAL RENAME BOT RUNNING")
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-API_ID = int(os.getenv("API_ID"))
+API_ID = os.getenv("API_ID")
 API_HASH = os.getenv("API_HASH")
 MONGO_URI = os.getenv("MONGO_URI")
-ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()]
+ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
 
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN missing in .env")
+
+if not API_ID:
+    raise ValueError("API_ID missing in .env")
+
+if not API_HASH:
+    raise ValueError("API_HASH missing in .env")
+
+if not MONGO_URI:
+    raise ValueError("MONGO_URI missing in .env")
+
+API_ID = int(API_ID)
+
+ADMIN_IDS = [
+    int(x.strip())
+    for x in ADMIN_IDS_RAW.split(",")
+    if x.strip().isdigit()
+]
+
+ADMIN_USERNAME = "everscythe3"
+ADMIN_LINK = f"https://t.me/{ADMIN_USERNAME}"
 PAYPAL_EMAIL = "sasivardhan356@gmail.com"
 
 DOWNLOAD_DIR = "downloads"
@@ -50,44 +74,12 @@ def now_utc():
     return datetime.utcnow()
 
 
+def today_str():
+    return now_utc().strftime("%Y-%m-%d")
+
+
 def is_admin(user_id):
     return user_id in ADMIN_IDS
-
-
-def get_user(user_id):
-    user = users_col.find_one({"user_id": user_id})
-
-    if not user:
-        user = {
-            "user_id": user_id,
-            "premium": False,
-            "premium_expiry": None,
-            "caption": None,
-            "prefix": "",
-            "suffix": "",
-            "auto_format": None,
-            "thumbnail": None,
-            "thumb_count": 0,
-            "thumb_date": now_utc().strftime("%Y-%m-%d"),
-            "files_renamed": 0,
-            "joined_at": now_utc()
-        }
-        users_col.insert_one(user)
-
-    expiry = user.get("premium_expiry")
-    if expiry and isinstance(expiry, datetime) and expiry < now_utc():
-        users_col.update_one(
-            {"user_id": user_id},
-            {"$set": {"premium": False, "premium_expiry": None}}
-        )
-        user["premium"] = False
-        user["premium_expiry"] = None
-
-    return user
-
-
-def update_user(user_id, data):
-    users_col.update_one({"user_id": user_id}, {"$set": data}, upsert=True)
 
 
 def clean_filename(name):
@@ -114,13 +106,85 @@ def get_media(message):
 
 def get_media_info(message):
     media = get_media(message)
+
     file_name = getattr(media, "file_name", None) or "Unknown"
     file_size = getattr(media, "file_size", 0)
     mime_type = getattr(media, "mime_type", None) or "Unknown"
     dc_id = getattr(media, "dc_id", None) or "Unknown"
 
-    ext = os.path.splitext(file_name)[1].replace(".", "") or "Unknown"
+    ext = os.path.splitext(file_name)[1].replace(".", "")
+    if not ext:
+        ext = "Unknown"
+
     return file_name, file_size, ext, mime_type, dc_id
+
+
+def get_user(user_id):
+    user = users_col.find_one({"user_id": user_id})
+
+    if not user:
+        user = {
+            "user_id": user_id,
+            "premium": False,
+            "premium_expiry": None,
+            "caption": None,
+            "prefix": "",
+            "suffix": "",
+            "auto_format": None,
+            "thumbnail": None,
+            "thumb_count": 0,
+            "thumb_date": today_str(),
+            "files_renamed": 0,
+            "joined_at": now_utc()
+        }
+
+        users_col.insert_one(user)
+        return user
+
+    expiry = user.get("premium_expiry")
+
+    if expiry and isinstance(expiry, datetime) and expiry < now_utc():
+        users_col.update_one(
+            {"user_id": user_id},
+            {
+                "$set": {
+                    "premium": False,
+                    "premium_expiry": None
+                }
+            }
+        )
+
+        user["premium"] = False
+        user["premium_expiry"] = None
+
+    return user
+
+
+def update_user(user_id, data):
+    users_col.update_one(
+        {"user_id": user_id},
+        {"$set": data},
+        upsert=True
+    )
+
+
+def is_premium(user):
+    expiry = user.get("premium_expiry")
+
+    if not user.get("premium"):
+        return False
+
+    if expiry and isinstance(expiry, datetime) and expiry < now_utc():
+        update_user(
+            user["user_id"],
+            {
+                "premium": False,
+                "premium_expiry": None
+            }
+        )
+        return False
+
+    return True
 
 
 def extract_quality(filename):
@@ -149,27 +213,53 @@ def apply_auto_format(template, old_name):
     return clean_filename(new_name)
 
 
-def premium_text():
+def premium_message():
     return f"""
-💎 Premium Plans
+✨ Premium Benefits ✨
+
+Upgrade To Our Premium Service And Enjoy Exclusive Features :
+
+➲ Unlimited Renaming : Rename As Many Files As You Want Without Any Restrictions.
+➲ Unlimited Thumbnails : Set Unlimited Custom Thumbnails Without Daily Limits.
+➲ Faster Processing : Premium Users Get Faster Queue Priority.
+➲ Batch Rename : Rename Multiple Files At Once Easily.
+➲ Advanced Metadata Tools : Access Advanced Rename & Metadata Features.
+➲ No Ads / Token : Enjoy A Clean & Ads-Free Experience.
+➲ Early Access : Be The First To Use Upcoming Features Before Everyone Else.
+
+💎 Pricing 💎
 
 ⭐ 100 Telegram Stars → 1 Month Premium
 ⭐ 250 Telegram Stars → 3 Months Premium
+➜ Private Bot : Contact Owner
 
-✨ Premium Benefits:
-• Bigger file upload limit
-• Faster processing
-• Batch rename
-• Unlimited thumbnails
-• Advanced settings
-• Priority support
+💳 Payment Methods 💳
 
-💳 Payment Methods:
-• Telegram Stars
-• PayPal: {PAYPAL_EMAIL}
+➜ Telegram Stars
+➜ PayPal : {PAYPAL_EMAIL}
 
-After payment, send screenshot to admin for activation.
+👨‍💻 Admin / Developer 👨‍💻
+
+➜ Contact Admin : @{ADMIN_USERNAME}
+
+🚀 Unlock The Full Potential Of Our Professional Rename Bot With Premium Access.
+
+To Subscribe, Simply Contact The Developer Using The Button Below.
 """
+
+
+def premium_buttons():
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("⭐ 1 Month Premium", url=ADMIN_LINK)
+        ],
+        [
+            InlineKeyboardButton("💎 3 Months Premium", url=ADMIN_LINK)
+        ],
+        [
+            InlineKeyboardButton("📩 Contact Admin", url=ADMIN_LINK)
+        ]
+    ])
 
 
 def main_buttons():
@@ -218,6 +308,18 @@ def settings_buttons():
     ])
 
 
+async def safe_edit(message, text, reply_markup=None):
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+    except MessageNotModified:
+        pass
+    except Exception:
+        try:
+            await message.reply_text(text, reply_markup=reply_markup)
+        except Exception:
+            pass
+
+
 async def progress(current, total, message, start, text):
     now = time.time()
 
@@ -226,7 +328,7 @@ async def progress(current, total, message, start, text):
 
     try:
         percentage = current * 100 / total
-    except:
+    except Exception:
         percentage = 0
 
     speed = current / (now - start) if now - start else 0
@@ -240,7 +342,7 @@ async def progress(current, total, message, start, text):
             f"{format_size(current)} / {format_size(total)}\n"
             f"⚡ Speed: {format_size(speed)}/s"
         )
-    except:
+    except Exception:
         pass
 
 
@@ -272,6 +374,7 @@ async def ping(_, message):
 @bot.on_message(filters.command("start"))
 async def start(_, message):
     user = get_user(message.from_user.id)
+    plan = "Premium 💎" if is_premium(user) else "Free"
 
     await message.reply_text(
         f"""
@@ -291,7 +394,7 @@ Features:
 • Admin panel
 • MongoDB storage
 
-Plan: {"Premium 💎" if user.get("premium") else "Free"}
+Plan: {plan}
 
 Free Thumbnail Limit: {FREE_THUMB_LIMIT}/day
 
@@ -303,14 +406,35 @@ Send me any file/video/audio to begin.
 
 @bot.on_message(filters.command("premium"))
 async def premium(_, message):
-    await message.reply_text(premium_text())
+    await message.reply_text(
+        premium_message(),
+        reply_markup=premium_buttons()
+    )
+
+
+@bot.on_message(filters.command("donate"))
+async def donate(_, message):
+    await message.reply_text(
+        f"""
+💗 Support Developer
+
+PayPal:
+{PAYPAL_EMAIL}
+
+Admin:
+@{ADMIN_USERNAME}
+""",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📩 Contact Admin", url=ADMIN_LINK)]
+        ])
+    )
 
 
 @bot.on_message(filters.command("myplan"))
 async def myplan(_, message):
     user = get_user(message.from_user.id)
-    limit = PREMIUM_LIMIT if user.get("premium") else FREE_LIMIT
-
+    premium_status = is_premium(user)
+    limit = PREMIUM_LIMIT if premium_status else FREE_LIMIT
     expiry = user.get("premium_expiry")
     expiry_text = expiry.strftime("%d-%m-%Y") if expiry else "None"
 
@@ -318,7 +442,7 @@ async def myplan(_, message):
         f"""
 ❄️ Your Current Plan
 
-Plan: {"Premium 💎" if user.get("premium") else "Free"}
+Plan: {"Premium 💎" if premium_status else "Free"}
 File Limit: {format_size(limit)}
 Files Renamed: {user.get("files_renamed", 0)}
 Thumbnail Used Today: {user.get("thumb_count", 0)} / {FREE_THUMB_LIMIT}
@@ -329,7 +453,10 @@ Premium Expiry: {expiry_text}
 
 @bot.on_message(filters.command("settings"))
 async def settings(_, message):
-    await message.reply_text("⚙️ Settings", reply_markup=settings_buttons())
+    await message.reply_text(
+        "⚙️ Settings",
+        reply_markup=settings_buttons()
+    )
 
 
 @bot.on_message(filters.command("viewthumb"))
@@ -351,7 +478,7 @@ async def delthumb(_, message):
     if thumb and os.path.exists(thumb):
         try:
             os.remove(thumb)
-        except:
+        except Exception:
             pass
 
     update_user(message.from_user.id, {"thumbnail": None})
@@ -361,33 +488,23 @@ async def delthumb(_, message):
 @bot.on_message(filters.command("set_caption"))
 async def set_caption(_, message):
     waiting[message.from_user.id] = "caption"
-    await message.reply_text("✏️ Send your custom caption.\n\nUse `{filename}` for file name.")
+    await message.reply_text(
+        "✏️ Send your custom caption.\n\nUse `{filename}` for file name."
+    )
 
 
 @bot.on_message(filters.command("see_caption"))
 async def see_caption(_, message):
     user = get_user(message.from_user.id)
-    await message.reply_text(f"👀 Your caption:\n\n{user.get('caption') or 'No caption saved.'}")
+    await message.reply_text(
+        f"👀 Your caption:\n\n{user.get('caption') or 'No caption saved.'}"
+    )
 
 
 @bot.on_message(filters.command("del_caption"))
 async def del_caption(_, message):
     update_user(message.from_user.id, {"caption": None})
     await message.reply_text("🗑 Custom caption deleted.")
-
-
-@bot.on_message(filters.command("donate"))
-async def donate(_, message):
-    await message.reply_text(
-        f"""
-💗 Support Developer
-
-PayPal:
-{PAYPAL_EMAIL}
-
-Thank you for supporting the bot.
-"""
-    )
 
 
 @bot.on_callback_query()
@@ -397,40 +514,52 @@ async def callback_handler(_, query):
 
     if data == "rename":
         waiting[user_id] = "rename"
-        await query.message.edit_text("📁 Send file/video/audio to rename.")
+        await safe_edit(query.message, "📁 Send file/video/audio to rename.")
 
     elif data == "batch":
         waiting[user_id] = "batch"
         batch_files[user_id] = []
-        await query.message.edit_text("📦 Batch Rename Mode\n\nSend multiple files.\nWhen finished, send /done")
+        await safe_edit(
+            query.message,
+            "📦 Batch Rename Mode\n\nSend multiple files.\nWhen finished, send /done"
+        )
 
     elif data == "thumbnail":
         waiting[user_id] = "thumbnail"
-        await query.message.edit_text("🖼 Send an image to save as thumbnail.")
+        await safe_edit(query.message, "🖼 Send an image to save as thumbnail.")
 
     elif data == "settings":
-        await query.message.edit_text("⚙ Settings", reply_markup=settings_buttons())
+        await safe_edit(query.message, "⚙ Settings", reply_markup=settings_buttons())
 
     elif data == "premium":
-        await query.message.edit_text(premium_text(), reply_markup=main_buttons())
+        await safe_edit(
+            query.message,
+            premium_message(),
+            reply_markup=premium_buttons()
+        )
 
     elif data == "donate":
-        await query.message.edit_text(
-            f"💗 Support Developer\n\nPayPal:\n{PAYPAL_EMAIL}",
-            reply_markup=main_buttons()
+        await safe_edit(
+            query.message,
+            f"💗 Support Developer\n\nPayPal:\n{PAYPAL_EMAIL}\n\nAdmin: @{ADMIN_USERNAME}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📩 Contact Admin", url=ADMIN_LINK)]
+            ])
         )
 
     elif data == "myplan":
         user = get_user(user_id)
-        limit = PREMIUM_LIMIT if user.get("premium") else FREE_LIMIT
+        premium_status = is_premium(user)
+        limit = PREMIUM_LIMIT if premium_status else FREE_LIMIT
         expiry = user.get("premium_expiry")
         expiry_text = expiry.strftime("%d-%m-%Y") if expiry else "None"
 
-        await query.message.edit_text(
+        await safe_edit(
+            query.message,
             f"""
 ❄️ Your Current Plan
 
-Plan: {"Premium 💎" if user.get("premium") else "Free"}
+Plan: {"Premium 💎" if premium_status else "Free"}
 File Limit: {format_size(limit)}
 Files Renamed: {user.get("files_renamed", 0)}
 Thumbnail Used Today: {user.get("thumb_count", 0)} / {FREE_THUMB_LIMIT}
@@ -441,30 +570,41 @@ Premium Expiry: {expiry_text}
 
     elif data == "set_caption":
         waiting[user_id] = "caption"
-        await query.message.edit_text("✏️ Send caption.\n\nUse {filename} for renamed file name.")
+        await safe_edit(
+            query.message,
+            "✏️ Send caption.\n\nUse {filename} for renamed file name."
+        )
 
     elif data == "see_caption":
         user = get_user(user_id)
-        await query.message.edit_text(
+        await safe_edit(
+            query.message,
             f"👀 Your caption:\n\n{user.get('caption') or 'No caption saved.'}",
             reply_markup=settings_buttons()
         )
 
     elif data == "del_caption":
         update_user(user_id, {"caption": None})
-        await query.message.edit_text("🗑 Caption deleted.", reply_markup=settings_buttons())
+        await safe_edit(
+            query.message,
+            "🗑 Caption deleted.",
+            reply_markup=settings_buttons()
+        )
 
     elif data == "prefix":
         waiting[user_id] = "prefix"
-        await query.message.edit_text("➕ Send prefix text.")
+        await safe_edit(query.message, "➕ Send prefix text.")
 
     elif data == "suffix":
         waiting[user_id] = "suffix"
-        await query.message.edit_text("➖ Send suffix text.")
+        await safe_edit(query.message, "➖ Send suffix text.")
 
     elif data == "auto":
         waiting[user_id] = "auto"
-        await query.message.edit_text("🔁 Send auto rename format.\n\nExample:\n{title} - {quality} - @YourChannel")
+        await safe_edit(
+            query.message,
+            "🔁 Send auto rename format.\n\nExample:\n{title} - {quality} - @YourChannel"
+        )
 
     elif data == "viewthumb":
         user = get_user(user_id)
@@ -473,7 +613,11 @@ Premium Expiry: {expiry_text}
         if thumb and os.path.exists(thumb):
             await query.message.reply_photo(thumb, caption="👀 Your current thumbnail.")
         else:
-            await query.message.edit_text("No thumbnail saved.", reply_markup=settings_buttons())
+            await safe_edit(
+                query.message,
+                "No thumbnail saved.",
+                reply_markup=settings_buttons()
+            )
 
     elif data == "delthumb":
         user = get_user(user_id)
@@ -482,14 +626,19 @@ Premium Expiry: {expiry_text}
         if thumb and os.path.exists(thumb):
             try:
                 os.remove(thumb)
-            except:
+            except Exception:
                 pass
 
         update_user(user_id, {"thumbnail": None})
-        await query.message.edit_text("🗑 Thumbnail deleted.", reply_markup=settings_buttons())
+        await safe_edit(
+            query.message,
+            "🗑 Thumbnail deleted.",
+            reply_markup=settings_buttons()
+        )
 
     elif data == "help":
-        await query.message.edit_text(
+        await safe_edit(
+            query.message,
             """
 ❓ Help
 
@@ -508,17 +657,29 @@ Episode {number}.mkv
         )
 
     elif data == "reset":
-        update_user(user_id, {
-            "caption": None,
-            "prefix": "",
-            "suffix": "",
-            "auto_format": None,
-            "thumbnail": None
-        })
-        await query.message.edit_text("Settings reset.", reply_markup=main_buttons())
+        update_user(
+            user_id,
+            {
+                "caption": None,
+                "prefix": "",
+                "suffix": "",
+                "auto_format": None,
+                "thumbnail": None
+            }
+        )
+
+        await safe_edit(
+            query.message,
+            "Settings reset.",
+            reply_markup=main_buttons()
+        )
 
     elif data == "back":
-        await query.message.edit_text("Main Menu", reply_markup=main_buttons())
+        await safe_edit(
+            query.message,
+            "Main Menu",
+            reply_markup=main_buttons()
+        )
 
     await query.answer()
 
@@ -531,13 +692,19 @@ async def photo_handler(_, message):
     if waiting.get(user_id) != "thumbnail":
         return await message.reply_text("Click 🖼 Thumbnail first.")
 
-    today = now_utc().strftime("%Y-%m-%d")
+    today = today_str()
 
     if user.get("thumb_date") != today:
-        update_user(user_id, {"thumb_date": today, "thumb_count": 0})
+        update_user(
+            user_id,
+            {
+                "thumb_date": today,
+                "thumb_count": 0
+            }
+        )
         user["thumb_count"] = 0
 
-    if not user.get("premium") and user.get("thumb_count", 0) >= FREE_THUMB_LIMIT:
+    if not is_premium(user) and user.get("thumb_count", 0) >= FREE_THUMB_LIMIT:
         return await message.reply_text(
             f"""
 ⚠️ Daily thumbnail limit reached.
@@ -546,17 +713,23 @@ Free users can set {FREE_THUMB_LIMIT} thumbnails per day.
 
 Upgrade to premium for unlimited thumbnails.
 
-{premium_text()}
-"""
+{premium_message()}
+""",
+            reply_markup=premium_buttons()
         )
 
-    path = await message.download(file_name=f"{DOWNLOAD_DIR}/thumb_{user_id}.jpg")
+    path = await message.download(
+        file_name=f"{DOWNLOAD_DIR}/thumb_{user_id}.jpg"
+    )
 
-    update_user(user_id, {
-        "thumbnail": path,
-        "thumb_count": user.get("thumb_count", 0) + 1,
-        "thumb_date": today
-    })
+    update_user(
+        user_id,
+        {
+            "thumbnail": path,
+            "thumb_count": user.get("thumb_count", 0) + 1,
+            "thumb_date": today
+        }
+    )
 
     waiting[user_id] = None
     await message.reply_text("Thumbnail saved.")
@@ -571,20 +744,26 @@ async def file_handler(client, message):
     if not media:
         return
 
-    if user_id in cooldown and time.time() - cooldown[user_id] < 3 and not user.get("premium"):
+    if user_id in cooldown and time.time() - cooldown[user_id] < 3 and not is_premium(user):
         return await message.reply_text("Slow down. Try again in a few seconds.")
 
     cooldown[user_id] = time.time()
 
     file_size = getattr(media, "file_size", 0)
-    limit = PREMIUM_LIMIT if user.get("premium") else FREE_LIMIT
+    limit = PREMIUM_LIMIT if is_premium(user) else FREE_LIMIT
 
     if file_size > limit:
-        return await message.reply_text(f"File too large.\n\nYour limit: {format_size(limit)}")
+        return await message.reply_text(
+            f"File too large.\n\nYour limit: {format_size(limit)}",
+            reply_markup=premium_buttons() if not is_premium(user) else None
+        )
 
     if waiting.get(user_id) == "batch":
         batch_files.setdefault(user_id, []).append(message)
-        return await message.reply_text(f"Added to batch: {len(batch_files[user_id])}\n\nSend more files or send /done.")
+
+        return await message.reply_text(
+            f"Added to batch: {len(batch_files[user_id])}\n\nSend more files or send /done."
+        )
 
     file_name, size, ext, mime, dc = get_media_info(message)
 
@@ -592,7 +771,10 @@ async def file_handler(client, message):
         new_name = apply_auto_format(user.get("auto_format"), file_name)
         return await rename_file(client, message, new_name)
 
-    waiting[user_id] = {"type": "rename_name", "message": message}
+    waiting[user_id] = {
+        "type": "rename_name",
+        "message": message
+    }
 
     await message.reply_text(
         f"""
@@ -678,10 +860,14 @@ async def text_handler(client, message):
     if isinstance(state, dict) and state.get("type") == "rename_name":
         file_msg = state["message"]
         new_name = clean_filename(message.text)
+
         waiting[user_id] = None
         return await rename_file(client, file_msg, new_name)
 
-    await message.reply_text("Send me a file/video/audio to rename.", reply_markup=main_buttons())
+    await message.reply_text(
+        "Send me a file/video/audio to rename.",
+        reply_markup=main_buttons()
+    )
 
 
 async def rename_file(client, file_msg, new_name):
@@ -723,6 +909,7 @@ async def rename_file(client, file_msg, new_name):
         caption = caption.replace("{filename}", final_name) if caption else final_name
 
         thumb = user.get("thumbnail")
+
         if thumb and not os.path.exists(thumb):
             thumb = None
 
@@ -762,13 +949,13 @@ async def rename_file(client, file_msg, new_name):
         try:
             if renamed_path and os.path.exists(renamed_path):
                 os.remove(renamed_path)
-        except:
+        except Exception:
             pass
 
         try:
             if download_path and os.path.exists(download_path):
                 os.remove(download_path)
-        except:
+        except Exception:
             pass
 
 
@@ -822,20 +1009,31 @@ async def add_premium(_, message):
 
     try:
         parts = message.text.split()
+
         user_id = int(parts[1])
         months = int(parts[2]) if len(parts) > 2 else 1
 
         expiry = now_utc() + timedelta(days=30 * months)
 
-        update_user(user_id, {
-            "premium": True,
-            "premium_expiry": expiry
-        })
+        update_user(
+            user_id,
+            {
+                "premium": True,
+                "premium_expiry": expiry
+            }
+        )
 
         await message.reply_text(
-            f"Premium added.\nUser: `{user_id}`\nMonths: {months}\nExpiry: {expiry.strftime('%d-%m-%Y')}"
+            f"""
+Premium added.
+
+User: `{user_id}`
+Months: {months}
+Expiry: {expiry.strftime("%d-%m-%Y")}
+"""
         )
-    except:
+
+    except Exception:
         await message.reply_text("Usage:\n/add_premium user_id months")
 
 
@@ -846,9 +1044,18 @@ async def remove_premium(_, message):
 
     try:
         user_id = int(message.text.split()[1])
-        update_user(user_id, {"premium": False, "premium_expiry": None})
+
+        update_user(
+            user_id,
+            {
+                "premium": False,
+                "premium_expiry": None
+            }
+        )
+
         await message.reply_text("Premium removed.")
-    except:
+
+    except Exception:
         await message.reply_text("Usage:\n/remove_premium user_id")
 
 
@@ -889,10 +1096,12 @@ async def broadcast(client, message):
         try:
             await client.send_message(user["user_id"], text)
             sent += 1
-        except:
+        except Exception:
             failed += 1
 
-    await message.reply_text(f"Broadcast completed.\nSent: {sent}\nFailed: {failed}")
+    await message.reply_text(
+        f"Broadcast completed.\nSent: {sent}\nFailed: {failed}"
+    )
 
 
 async def main():
